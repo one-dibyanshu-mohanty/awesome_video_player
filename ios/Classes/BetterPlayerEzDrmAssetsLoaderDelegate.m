@@ -25,27 +25,54 @@ NSString * DEFAULT_LICENSE_SERVER_URL = @"https://fps.ezdrm.com/api/licenses/";
  ** It returns CKC.
  ** ---------------------------------------*/
 - (NSData *)getContentKeyAndLeaseExpiryFromKeyServerModuleWithRequest:(NSData*)requestBytes and:(NSString *)assetId and:(NSString *)customParams and:(NSError *)errorOut {
-    NSData * decodedData;
-    NSURLResponse * response;
+    NSData *decodedData = nil;
+    NSURLResponse *response = nil;
+    NSError *error = nil;
     
-    NSURL * finalLicenseURL;
+    NSURL *finalLicenseURL;
     if (_licenseURL != [NSNull null]){
         finalLicenseURL = _licenseURL;
     } else {
         finalLicenseURL = [[NSURL alloc] initWithString: DEFAULT_LICENSE_SERVER_URL];
     }
-    NSURL * ksmURL = [[NSURL alloc] initWithString: [NSString stringWithFormat:@"%@%@%@",finalLicenseURL,assetId,customParams]];
-    
-    NSMutableURLRequest * request = [[NSMutableURLRequest alloc] initWithURL:ksmURL];
+    NSURL *ksmURL = [[NSURL alloc] initWithString: [NSString stringWithFormat:@"%@",finalLicenseURL]];
+
+    // Prepare JSON body with base64-encoded SPC
+    NSString *spcBase64 = [requestBytes base64EncodedStringWithOptions:0];
+    NSDictionary *jsonBody = @{ @"spc": spcBase64 };
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:jsonBody options:0 error:&error];
+    if (error) {
+        return nil;
+    }
+
+    NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:ksmURL];
     [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-type"];
-    [request setHTTPBody:requestBytes];
-    
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-type"];
+    [request setHTTPBody:jsonData];
+
     @try {
-        decodedData = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:nil];
+        NSData *responseData = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
+        if (error) {
+            return nil;
+        }
+        if (responseData) {
+            // Parse JSON and extract base64 CKC
+            NSDictionary *jsonResponse = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&error];
+            if (error) {
+                return nil;
+            }
+            NSString *ckcBase64 = jsonResponse[@"ckc"];
+            if (ckcBase64 && [ckcBase64 isKindOfClass:[NSString class]]) {
+                decodedData = [[NSData alloc] initWithBase64EncodedString:ckcBase64 options:0];
+            } else {
+                return nil;
+            }
+        } else {
+            NSLog(@"[ERROR] No response data from license server");
+        }
     }
     @catch (NSException* excp) {
-        NSLog(@"SDK Error, SDK responded with Error: (error)");
+        NSLog(@"[ERROR] SDK Error, SDK responded with Error: %@", excp);
     }
     return decodedData;
 }
@@ -67,8 +94,13 @@ NSString * DEFAULT_LICENSE_SERVER_URL = @"https://fps.ezdrm.com/api/licenses/";
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
     NSURL *assetURI = loadingRequest.request.URL;
     NSString * str = assetURI.absoluteString;
-    NSString * mySubstring = [str substringFromIndex:str.length - 36];
-    _assetId = mySubstring;
+    // Extract assetId safely from the URL
+    NSString *assetId = assetURI.host;
+    if (!assetId || assetId.length == 0) {
+        // fallback: try path or the whole string after "skd://"
+        assetId = [str stringByReplacingOccurrencesOfString:@"skd://" withString:@""];
+    }
+    _assetId = assetId;
     NSString * scheme = assetURI.scheme;
     NSData * requestBytes;
     NSData * certificate;
